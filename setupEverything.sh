@@ -1,13 +1,15 @@
 #!/bin/bash
 
-# Ultimate Docker Stack Setup Script
-# Includes: Pelican Panel + Wings + Portainer + Suwayomi + Caddy
-# Works for both localhost and production domains
+# Ultimate All-in-One Game Server Stack Installer
+# Includes: Pelican Panel + Wings (proper host install) + Portainer + Suwayomi + Caddy
+# Features: Docker no-sudo fix, complete automation, production & local support
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Function to print colored messages
@@ -15,89 +17,185 @@ print_status() { echo -e "${YELLOW}➜${NC} $1"; }
 print_success() { echo -e "${GREEN}✓${NC} $1"; }
 print_error() { echo -e "${RED}✗${NC} $1"; }
 print_info() { echo -e "${BLUE}ℹ${NC} $1"; }
+print_important() { echo -e "${PURPLE}⚠${NC} $1"; }
+print_step() { echo -e "${CYAN}[$1]${NC} $2"; }
 
 # Banner
 clear
-echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         Complete Game Server Stack Installer            ║${NC}"
-echo -e "${GREEN}║  Pelican + Wings + Portainer + Suwayomi + Caddy        ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+cat << "EOF"
+   ____                        ____                           
+  / ___| __ _ _ __ ___   ___  / ___|  ___ _ ____   _____ _ __ 
+ | |  _ / _` | '_ ` _ \ / _ \ \___ \ / _ \ '__\ \ / / _ \ '__|
+ | |_| | (_| | | | | | |  __/  ___) |  __/ |   \ V /  __/ |   
+  \____|\__,_|_| |_| |_|\___| |____/ \___|_|    \_/ \___|_|   
+                                                              
+        Complete Stack Installer v2.0 - All-in-One Edition
+EOF
+echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 echo ""
 
-# Check if Docker is installed
-if ! command -v docker &> /dev/null; then
-    print_error "Docker is not installed!"
-    echo "Install Docker first: https://docs.docker.com/get-docker/"
-    exit 1
+# Detect OS
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$NAME
+    VER=$VERSION_ID
 fi
 
-# Check if running as root (warn but don't stop)
-if [ "$EUID" -eq 0 ]; then 
-   print_info "Running as root - be careful!"
+print_info "Detected OS: $OS $VER"
+
+# Check if running with proper permissions
+if [ "$EUID" -ne 0 ] && [ "$1" != "--user-mode" ]; then 
+   print_error "This installer needs sudo privileges for initial setup"
+   echo ""
+   echo "Please run: ${GREEN}sudo bash $0${NC}"
+   echo ""
+   echo "The script will:"
+   echo "  • Install Docker and Wings"
+   echo "  • Configure your user to run Docker without sudo"
+   echo "  • Set up all services"
+   exit 1
 fi
 
-# Setup type selection
-echo "Choose your installation type:"
-echo ""
-echo "  1) ${GREEN}Local Development${NC} (localhost)"
-echo "  2) ${BLUE}Production Server${NC} (with domain)"
-echo "  3) ${YELLOW}Quick Local${NC} (no questions asked)"
-echo ""
-read -p "Enter choice [1-3]: " -n 1 -r
-echo ""
-echo ""
-
-INSTALL_DIR="game-stack"
-SETUP_TYPE=""
-DOMAIN=""
-EMAIL=""
-
-case $REPLY in
-    1)
-        SETUP_TYPE="local"
-        print_status "Setting up for local development..."
-        ;;
-    2)
-        SETUP_TYPE="production"
-        print_status "Setting up for production..."
-        echo ""
-        read -p "Enter your domain (e.g., example.com): " DOMAIN
-        read -p "Enter your email for SSL certificates: " EMAIL
-        
-        if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ]; then
-            print_error "Domain and email are required for production!"
-            exit 1
-        fi
-        ;;
-    3)
-        SETUP_TYPE="quick"
-        print_status "Quick local setup - here we go!"
-        ;;
-    *)
-        print_error "Invalid choice!"
+# Get the actual user (not root)
+if [ "$SUDO_USER" ]; then
+    ACTUAL_USER=$SUDO_USER
+elif [ "$EUID" -eq 0 ]; then
+    print_step "1/10" "User Configuration"
+    echo -n "Enter the username that will manage the stack: "
+    read -r ACTUAL_USER
+    if ! id "$ACTUAL_USER" &>/dev/null; then
+        print_error "User $ACTUAL_USER does not exist!"
         exit 1
-        ;;
-esac
-
-# Create and enter directory
-print_status "Creating directory: $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR" || exit
-
-# Clean up any existing setup
-if [ -f docker-compose.yml ]; then
-    print_info "Found existing setup, backing up..."
-    mv docker-compose.yml docker-compose.backup.$(date +%s).yml
+    fi
+else
+    ACTUAL_USER=$(whoami)
 fi
 
-# Stop any existing containers
-docker compose down 2>/dev/null || true
+print_success "Stack will be configured for user: $ACTUAL_USER"
 
-# Create docker-compose.yml
-print_status "Creating docker-compose.yml..."
+# Installation mode selection
+echo ""
+print_step "2/10" "Installation Mode"
+echo ""
+echo "Choose your installation mode:"
+echo ""
+echo "  ${GREEN}1)${NC} Quick Install - Local Development (localhost)"
+echo "  ${BLUE}2)${NC} Production Install (with domain & SSL)"
+echo "  ${YELLOW}3)${NC} Custom Install (choose components)"
+echo "  ${CYAN}4)${NC} Docker Fix Only (make Docker work without sudo)"
+echo ""
+read -p "Select mode [1-4]: " -n 1 -r INSTALL_MODE
+echo ""
+echo ""
 
-if [ "$SETUP_TYPE" = "production" ]; then
-    cat > docker-compose.yml << EOF
+# Function to install Docker
+install_docker() {
+    print_step "3/10" "Docker Installation"
+    
+    if command -v docker &> /dev/null; then
+        print_success "Docker is already installed"
+        return 0
+    fi
+    
+    print_status "Installing Docker..."
+    curl -sSL https://get.docker.com/ | CHANNEL=stable sh
+    systemctl enable --now docker
+    print_success "Docker installed successfully"
+}
+
+# Function to setup Docker without sudo
+setup_docker_nosudo() {
+    print_step "4/10" "Docker Permission Configuration"
+    
+    # Create docker group if it doesn't exist
+    if ! getent group docker > /dev/null 2>&1; then
+        groupadd docker
+        print_success "Created docker group"
+    fi
+    
+    # Add user to docker group
+    if ! groups "$ACTUAL_USER" | grep -q docker; then
+        usermod -aG docker "$ACTUAL_USER"
+        print_success "Added $ACTUAL_USER to docker group"
+        NEED_RELOGIN=true
+    else
+        print_success "$ACTUAL_USER is already in docker group"
+        NEED_RELOGIN=false
+    fi
+}
+
+# Function to install Wings
+install_wings() {
+    print_step "5/10" "Wings Daemon Installation"
+    
+    # Check if Wings is already installed
+    if [ -f /usr/local/bin/wings ]; then
+        print_info "Wings binary already exists"
+        echo -n "Reinstall Wings? (y/n): "
+        read -r response
+        if [[ ! "$response" == "y" ]]; then
+            return 0
+        fi
+    fi
+    
+    print_status "Installing Wings daemon..."
+    
+    # Create required directories
+    mkdir -p /etc/pelican
+    mkdir -p /var/run/wings
+    mkdir -p /var/lib/pelican/{volumes,backups,archives}
+    mkdir -p /var/log/pelican
+    mkdir -p /tmp/pelican
+    
+    # Download Wings binary
+    print_status "Downloading Wings binary..."
+    ARCH=$([[ "$(uname -m)" == "x86_64" ]] && echo "amd64" || echo "arm64")
+    curl -L -o /usr/local/bin/wings "https://github.com/pelican-dev/wings/releases/latest/download/wings_linux_${ARCH}"
+    chmod u+x /usr/local/bin/wings
+    
+    # Create systemd service
+    cat > /etc/systemd/system/wings.service << 'EOF'
+[Unit]
+Description=Wings Daemon
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+User=root
+WorkingDirectory=/etc/pelican
+LimitNOFILE=4096
+PIDFile=/var/run/wings/daemon.pid
+ExecStart=/usr/local/bin/wings
+Restart=on-failure
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    print_success "Wings installed successfully"
+}
+
+# Function to create stack files
+create_stack_files() {
+    local setup_type=$1
+    local domain=$2
+    local email=$3
+    local install_dir=$4
+    
+    print_step "6/10" "Creating Configuration Files"
+    
+    cd "$install_dir" || exit
+    
+    # Create docker-compose.yml
+    print_status "Creating docker-compose.yml..."
+    
+    if [ "$setup_type" = "production" ]; then
+        cat > docker-compose.yml << EOF
 version: '3'
 
 services:
@@ -113,50 +211,20 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      - web
-    depends_on:
       - pelican
-      - wings
-      - portainer
-      - suwayomi
 
   pelican:
     image: ghcr.io/pelican-dev/panel:latest
     container_name: pelican
     restart: unless-stopped
     volumes:
-      - pelican-data:/pelican-data
+      - pelican_data:/pelican-data
       - ./pelican-caddyfile:/etc/caddy/Caddyfile
     environment:
-      APP_URL: "https://panel.$DOMAIN"
-      ADMIN_EMAIL: "$EMAIL"
+      APP_URL: "https://panel.$domain"
+      ADMIN_EMAIL: "$email"
     networks:
-      - web
-
-  wings:
-    image: ghcr.io/pelican-dev/wings:latest
-    container_name: wings
-    restart: unless-stopped
-    privileged: true
-    ports:
-      - "8080:8080"
-      - "2022:2022"
-      - "25565:25565"
-      - "25566-25575:25566-25575"
-      - "27015:27015"
-      - "27015:27015/udp"
-      - "7777-7780:7777-7780/udp"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/volumes:/var/lib/docker/volumes
-      - wings-config:/etc/pelican
-      - wings-data:/var/lib/pelican
-      - wings-logs:/var/log/pelican
-      - /tmp/pelican:/tmp/pelican
-    environment:
-      WINGS_DEBUG: "false"
-    networks:
-      - web
+      - pelican
 
   portainer:
     image: portainer/portainer-ce:latest
@@ -164,36 +232,61 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - portainer-data:/data
+      - portainer_data:/data
     networks:
-      - web
+      - pelican
 
   suwayomi:
     image: ghcr.io/suwayomi/suwayomi-server:latest
     container_name: suwayomi
     restart: unless-stopped
     volumes:
-      - suwayomi-data:/home/suwayomi/.local/share/Tachidesk
+      - suwayomi_data:/home/suwayomi/.local/share/Tachidesk
     networks:
-      - web
+      - pelican
 
 volumes:
   caddy_data:
   caddy_config:
-  pelican-data:
-  wings-config:
-  wings-data:
-  wings-logs:
-  portainer-data:
-  suwayomi-data:
+  pelican_data:
+  portainer_data:
+  suwayomi_data:
 
 networks:
-  web:
+  pelican:
+    name: pelican
+    driver: bridge
 EOF
+        
+        # Create production Caddyfile
+        cat > Caddyfile << EOF
+{
+    email $email
+}
 
-else
-    # Local setup (both quick and interactive)
-    cat > docker-compose.yml << 'EOF'
+panel.$domain {
+    reverse_proxy pelican:80
+}
+
+portainer.$domain {
+    reverse_proxy portainer:9000
+}
+
+manga.$domain {
+    reverse_proxy suwayomi:4567
+}
+
+$domain {
+    redir https://panel.$domain permanent
+}
+
+www.$domain {
+    redir https://panel.$domain permanent
+}
+EOF
+    else
+        # Local development setup
+        cat > docker-compose.yml << 'EOF'
 version: '3'
 
 services:
@@ -206,50 +299,20 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
     networks:
-      - web
-    depends_on:
       - pelican
-      - wings
-      - portainer
-      - suwayomi
 
   pelican:
     image: ghcr.io/pelican-dev/panel:latest
     container_name: pelican
     restart: unless-stopped
     volumes:
-      - pelican-data:/pelican-data
+      - pelican_data:/pelican-data
       - ./pelican-caddyfile:/etc/caddy/Caddyfile
     environment:
       APP_URL: "http://panel.localhost"
       ADMIN_EMAIL: "admin@example.com"
     networks:
-      - web
-
-  wings:
-    image: ghcr.io/pelican-dev/wings:latest
-    container_name: wings
-    restart: unless-stopped
-    privileged: true
-    ports:
-      - "8080:8080"
-      - "2022:2022"
-      - "25565:25565"
-      - "25566-25575:25566-25575"
-      - "27015:27015"
-      - "27015:27015/udp"
-      - "7777-7780:7777-7780/udp"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/volumes:/var/lib/docker/volumes
-      - wings-config:/etc/pelican
-      - wings-data:/var/lib/pelican
-      - wings-logs:/var/log/pelican
-      - /tmp/pelican:/tmp/pelican
-    environment:
-      WINGS_DEBUG: "false"
-    networks:
-      - web
+      - pelican
 
   portainer:
     image: portainer/portainer-ce:latest
@@ -257,79 +320,38 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - portainer-data:/data
+      - portainer_data:/data
     networks:
-      - web
+      - pelican
 
   suwayomi:
     image: ghcr.io/suwayomi/suwayomi-server:latest
     container_name: suwayomi
     restart: unless-stopped
     volumes:
-      - suwayomi-data:/home/suwayomi/.local/share/Tachidesk
+      - suwayomi_data:/home/suwayomi/.local/share/Tachidesk
     networks:
-      - web
+      - pelican
 
 volumes:
-  pelican-data:
-  wings-config:
-  wings-data:
-  wings-logs:
-  portainer-data:
-  suwayomi-data:
+  pelican_data:
+  portainer_data:
+  suwayomi_data:
 
 networks:
-  web:
+  pelican:
+    name: pelican
+    driver: bridge
 EOF
-fi
-
-print_success "docker-compose.yml created"
-
-# Create Caddyfile
-print_status "Creating Caddyfile..."
-
-if [ "$SETUP_TYPE" = "production" ]; then
-    cat > Caddyfile << EOF
-{
-    email $EMAIL
-}
-
-panel.$DOMAIN {
-    reverse_proxy pelican:80
-}
-
-wings.$DOMAIN {
-    reverse_proxy wings:8080
-}
-
-portainer.$DOMAIN {
-    reverse_proxy portainer:9000
-}
-
-manga.$DOMAIN {
-    reverse_proxy suwayomi:4567
-}
-
-$DOMAIN {
-    redir https://panel.$DOMAIN permanent
-}
-
-www.$DOMAIN {
-    redir https://panel.$DOMAIN permanent
-}
-EOF
-else
-    cat > Caddyfile << 'EOF'
+        
+        # Create local Caddyfile
+        cat > Caddyfile << 'EOF'
 {
     auto_https off
 }
 
 panel.localhost:80 {
     reverse_proxy pelican:80
-}
-
-wings.localhost:80 {
-    reverse_proxy wings:8080
 }
 
 portainer.localhost:80 {
@@ -341,28 +363,20 @@ manga.localhost:80 {
 }
 
 :80 {
-    respond "Game Server Stack Running!
-    
-Services:
+    respond "Game Server Stack Services:
+
 • Pelican Panel: http://panel.localhost
-• Wings Node: http://wings.localhost
 • Portainer: http://portainer.localhost
 • Suwayomi Manga: http://manga.localhost
 
-Game Server Ports:
-• Minecraft: 25565-25575
-• Source Games: 27015
-• Other Games: 7777-7780
-• SFTP: 2022"
+Wings is running on the host system.
+Configure it in Pelican Panel admin area."
 }
 EOF
-fi
-
-print_success "Caddyfile created"
-
-# Create pelican-caddyfile
-print_status "Creating Pelican Caddyfile override..."
-cat > pelican-caddyfile << 'EOF'
+    fi
+    
+    # Create pelican-caddyfile (same for both)
+    cat > pelican-caddyfile << 'EOF'
 {
     admin off
     auto_https off
@@ -375,152 +389,338 @@ cat > pelican-caddyfile << 'EOF'
     file_server
 }
 EOF
-
-print_success "Pelican Caddyfile created"
-
-# Create Wings setup helper script
-print_status "Creating Wings configuration helper..."
-cat > configure-wings.sh << 'WINGS_SCRIPT'
+    
+    # Create Wings configuration helper
+    cat > configure-wings.sh << 'EOF'
 #!/bin/bash
 
-echo "Wings Configuration Helper"
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${GREEN}Wings Configuration Helper${NC}"
 echo "=========================="
 echo ""
-echo "After Pelican Panel is installed:"
-echo "1. Go to Admin → Nodes → Create New"
-echo "2. Use these settings:"
-echo "   - Name: Local Node"
-echo "   - FQDN: wings (or wings.localhost for external)"
-echo "   - Daemon Port: 8080"
-echo "   - SFTP Port: 2022"
+echo "Step 1: Complete Pelican Panel setup"
+echo "  → Visit http://panel.localhost/installer"
 echo ""
-echo "3. Go to the node's Configuration tab"
-echo "4. Copy the configuration"
-echo "5. Run: docker exec -it wings sh"
-echo "6. Run: vi /etc/pelican/config.yml"
-echo "7. Paste the configuration and save"
-echo "8. Exit and run: docker restart wings"
+echo "Step 2: Create a node in Pelican Panel"
+echo "  → Admin → Nodes → Create New"
+echo "  → Name: Local Server"
+echo "  → FQDN: Enter one of these:"
+echo "    • For local: host.docker.internal"
+echo "    • For network: $(hostname -I | awk '{print $1}')"
+echo "  → Daemon Port: 8080"
+echo "  → SFTP Port: 2022"
 echo ""
-echo "Press Enter when ready to configure Wings..."
-read
+echo "Step 3: Copy the configuration"
+echo "  → Go to the node's Configuration tab"
+echo "  → Copy the entire configuration block"
+echo ""
+echo -e "${YELLOW}Ready to configure Wings? (y/n):${NC} "
+read -r response
 
-echo "Opening Wings shell. Paste your config when ready..."
-docker exec -it wings sh
-WINGS_SCRIPT
-chmod +x configure-wings.sh
+if [[ "$response" == "y" ]]; then
+    echo "Opening Wings config file..."
+    sudo nano /etc/pelican/config.yml
+    
+    echo ""
+    echo "Starting Wings service..."
+    sudo systemctl enable --now wings
+    
+    echo ""
+    echo "Checking Wings status..."
+    sleep 2
+    sudo systemctl status wings --no-pager
+    
+    echo ""
+    echo -e "${GREEN}Wings configuration complete!${NC}"
+    echo "Check Pelican Panel - the node should show as online."
+else
+    echo "Run this script again when ready to configure Wings."
+fi
+EOF
+    chmod +x configure-wings.sh
+    
+    print_success "Configuration files created"
+}
 
-print_success "Helper scripts created"
+# Function to start services
+start_services() {
+    print_step "7/10" "Starting Docker Services"
+    
+    # Pull images first
+    print_status "Pulling Docker images..."
+    if [ "$NEED_RELOGIN" = true ]; then
+        docker compose pull
+    else
+        su - "$ACTUAL_USER" -c "cd $(pwd) && docker compose pull"
+    fi
+    
+    # Start services
+    print_status "Starting services..."
+    if [ "$NEED_RELOGIN" = true ]; then
+        docker compose up -d
+    else
+        su - "$ACTUAL_USER" -c "cd $(pwd) && docker compose up -d"
+    fi
+    
+    print_success "Services started"
+}
 
-# Pull Docker images
-print_status "Pulling Docker images (this may take a few minutes)..."
-docker compose pull
+# Main execution based on mode
+case $INSTALL_MODE in
+    1)
+        # Quick Install - Local
+        print_info "Starting Quick Install for Local Development"
+        
+        INSTALL_DIR="/home/$ACTUAL_USER/game-stack"
+        
+        # Run all installation steps
+        install_docker
+        setup_docker_nosudo
+        install_wings
+        
+        # Create directory
+        mkdir -p "$INSTALL_DIR"
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$INSTALL_DIR"
+        
+        # Create stack files
+        create_stack_files "local" "" "" "$INSTALL_DIR"
+        
+        # Start services
+        cd "$INSTALL_DIR" || exit
+        start_services
+        
+        SETUP_TYPE="local"
+        ;;
+        
+    2)
+        # Production Install
+        print_info "Starting Production Installation"
+        
+        echo -n "Enter your domain (e.g., example.com): "
+        read -r DOMAIN
+        echo -n "Enter your email for SSL certificates: "
+        read -r EMAIL
+        
+        if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ]; then
+            print_error "Domain and email are required!"
+            exit 1
+        fi
+        
+        INSTALL_DIR="/home/$ACTUAL_USER/game-stack"
+        
+        # Run all installation steps
+        install_docker
+        setup_docker_nosudo
+        install_wings
+        
+        # Create directory
+        mkdir -p "$INSTALL_DIR"
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$INSTALL_DIR"
+        
+        # Create stack files
+        create_stack_files "production" "$DOMAIN" "$EMAIL" "$INSTALL_DIR"
+        
+        # Start services
+        cd "$INSTALL_DIR" || exit
+        start_services
+        
+        SETUP_TYPE="production"
+        ;;
+        
+    3)
+        # Custom Install
+        print_info "Custom Installation"
+        
+        echo "Select components to install:"
+        echo -n "Install Docker? (y/n): "
+        read -r INSTALL_DOCKER_CHOICE
+        echo -n "Configure Docker without sudo? (y/n): "
+        read -r DOCKER_NOSUDO_CHOICE
+        echo -n "Install Wings daemon? (y/n): "
+        read -r INSTALL_WINGS_CHOICE
+        echo -n "Install stack (Pelican, Portainer, etc)? (y/n): "
+        read -r INSTALL_STACK_CHOICE
+        
+        if [[ "$INSTALL_DOCKER_CHOICE" == "y" ]]; then
+            install_docker
+        fi
+        
+        if [[ "$DOCKER_NOSUDO_CHOICE" == "y" ]]; then
+            setup_docker_nosudo
+        fi
+        
+        if [[ "$INSTALL_WINGS_CHOICE" == "y" ]]; then
+            install_wings
+        fi
+        
+        if [[ "$INSTALL_STACK_CHOICE" == "y" ]]; then
+            echo -n "Local or Production? (l/p): "
+            read -r STACK_TYPE
+            
+            INSTALL_DIR="/home/$ACTUAL_USER/game-stack"
+            mkdir -p "$INSTALL_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$INSTALL_DIR"
+            
+            if [[ "$STACK_TYPE" == "p" ]]; then
+                echo -n "Enter domain: "
+                read -r DOMAIN
+                echo -n "Enter email: "
+                read -r EMAIL
+                create_stack_files "production" "$DOMAIN" "$EMAIL" "$INSTALL_DIR"
+                SETUP_TYPE="production"
+            else
+                create_stack_files "local" "" "" "$INSTALL_DIR"
+                SETUP_TYPE="local"
+            fi
+            
+            cd "$INSTALL_DIR" || exit
+            start_services
+        fi
+        ;;
+        
+    4)
+        # Docker Fix Only
+        print_info "Fixing Docker to work without sudo"
+        setup_docker_nosudo
+        
+        if [ "$NEED_RELOGIN" = true ]; then
+            echo ""
+            print_important "You must log out and back in for changes to take effect!"
+            echo "After relogin, test with: docker ps"
+        else
+            print_success "Docker already configured for $ACTUAL_USER"
+        fi
+        exit 0
+        ;;
+        
+    *)
+        print_error "Invalid choice!"
+        exit 1
+        ;;
+esac
 
-# Start services
-print_status "Starting all services..."
-docker compose up -d
+# Final summary
+print_step "8/10" "Installation Summary"
 
-# Wait for services to initialize
-print_status "Waiting for services to initialize..."
-for i in {1..10}; do
-    echo -n "."
-    sleep 1
-done
+echo ""
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║                    Installation Complete!                   ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Check services status
-print_status "Checking service status..."
-docker compose ps
-
-# Get Pelican app key if it exists
-APP_KEY=$(docker compose logs pelican 2>/dev/null | grep "Generated app key:" | tail -1 | cut -d':' -f3 | xargs)
-
-# Final output
-echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║                 Installation Complete!                  ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
-echo ""
+# Get Pelican app key if available
+APP_KEY=$(docker logs pelican 2>/dev/null | grep "Generated app key:" | tail -1 | cut -d':' -f3- | xargs)
 
 if [ "$SETUP_TYPE" = "production" ]; then
-    echo -e "${GREEN}Your services are available at:${NC}"
+    print_success "Production stack deployed!"
+    echo ""
+    echo "Services available at:"
     echo "  • Pelican Panel: https://panel.$DOMAIN"
-    echo "  • Wings Node: https://wings.$DOMAIN"
     echo "  • Portainer: https://portainer.$DOMAIN"
     echo "  • Suwayomi: https://manga.$DOMAIN"
     echo ""
-    echo -e "${YELLOW}⚠ Make sure your DNS is configured:${NC}"
-    echo "  A record: panel.$DOMAIN → Your Server IP"
-    echo "  A record: wings.$DOMAIN → Your Server IP"
-    echo "  A record: portainer.$DOMAIN → Your Server IP"
-    echo "  A record: manga.$DOMAIN → Your Server IP"
+    print_important "Configure your DNS records:"
+    echo "  A  panel.$DOMAIN     → Your Server IP"
+    echo "  A  portainer.$DOMAIN → Your Server IP"
+    echo "  A  manga.$DOMAIN     → Your Server IP"
 else
-    echo -e "${GREEN}Your services are available at:${NC}"
+    print_success "Local development stack deployed!"
+    echo ""
+    echo "Services available at:"
     echo "  • Pelican Panel: http://panel.localhost"
-    echo "  • Wings Node: http://wings.localhost (API)"
     echo "  • Portainer: http://portainer.localhost"
     echo "  • Suwayomi: http://manga.localhost"
 fi
 
 echo ""
-echo -e "${BLUE}Game Server Ports:${NC}"
-echo "  • Minecraft: 25565-25575"
-echo "  • Source Games: 27015"
-echo "  • Other Games: 7777-7780"
-echo "  • SFTP: 2022"
+print_step "9/10" "Required Next Steps"
+echo ""
 
-echo ""
-echo -e "${YELLOW}📝 Next Steps:${NC}"
-echo ""
-echo "1. ${GREEN}Setup Pelican Panel:${NC}"
-echo "   Visit panel URL → /installer"
-if [ -n "$APP_KEY" ]; then
-    echo "   ${GREEN}Your App Key: $APP_KEY${NC} (SAVE THIS!)"
+if [ "$NEED_RELOGIN" = true ]; then
+    echo "1. ${RED}IMPORTANT: Log out and back in${NC}"
+    echo "   This activates Docker without sudo for: $ACTUAL_USER"
+    echo ""
+    echo "2. Setup Pelican Panel:"
+else
+    echo "1. Setup Pelican Panel:"
 fi
+echo "   → Visit http://panel.localhost/installer"
+if [ -n "$APP_KEY" ]; then
+    echo "   → ${GREEN}App Key: $APP_KEY${NC} (SAVE THIS!)"
+fi
+echo ""
+echo "2. Configure Wings daemon:"
+echo "   → Run: ${CYAN}./configure-wings.sh${NC}"
+echo "   → This connects Wings to Pelican Panel"
+echo ""
+echo "3. Setup Portainer:"
+echo "   → Visit http://portainer.localhost"
+echo "   → Create admin account (5 minute timeout!)"
 
 echo ""
-echo "2. ${GREEN}Configure Wings:${NC}"
-echo "   After Pelican setup, run: ./configure-wings.sh"
-
+print_step "10/10" "Useful Commands"
 echo ""
-echo "3. ${GREEN}Setup Portainer:${NC}"
-echo "   Visit Portainer URL (create admin quickly - 5 min timeout)"
-
+echo "Stack Management:"
+echo "  ${GREEN}docker compose ps${NC}          - Check service status"
+echo "  ${GREEN}docker compose logs -f${NC}     - View all logs"
+echo "  ${GREEN}docker compose restart${NC}     - Restart services"
+echo "  ${GREEN}docker compose down${NC}        - Stop everything"
 echo ""
-echo -e "${BLUE}Useful Commands:${NC}"
-echo "  • View logs:        docker compose logs -f"
-echo "  • Restart services: docker compose restart"
-echo "  • Stop everything:  docker compose down"
-echo "  • Update services:  docker compose pull && docker compose up -d"
-echo "  • Configure Wings:  ./configure-wings.sh"
-
+echo "Wings Management:"
+echo "  ${GREEN}sudo systemctl status wings${NC}   - Check Wings status"
+echo "  ${GREEN}sudo systemctl restart wings${NC}  - Restart Wings"
+echo "  ${GREEN}sudo journalctl -u wings -f${NC}   - View Wings logs"
 echo ""
-echo -e "${GREEN}✨ Enjoy your game server stack!${NC}"
+echo "Configuration:"
+echo "  ${GREEN}./configure-wings.sh${NC}          - Wings setup helper"
 echo ""
 
-# Save installation info
-cat > installation-info.txt << EOF
-Installation completed at: $(date)
+# Save installation details
+cat > "$INSTALL_DIR/installation-info.txt" << EOF
+Installation Details
+====================
+Date: $(date)
+User: $ACTUAL_USER
 Type: $SETUP_TYPE
-Directory: $(pwd)
+Directory: $INSTALL_DIR
 $([ "$SETUP_TYPE" = "production" ] && echo "Domain: $DOMAIN")
 $([ "$SETUP_TYPE" = "production" ] && echo "Email: $EMAIL")
 $([ -n "$APP_KEY" ] && echo "Pelican App Key: $APP_KEY")
 
-Services:
-- Pelican Panel
-- Wings (Game Server Daemon)
-- Portainer (Docker Management)
-- Suwayomi (Manga Server)
-- Caddy (Reverse Proxy)
+Installed Components:
+- Docker (with no-sudo configuration)
+- Wings Daemon (host installation)
+- Pelican Panel (Docker)
+- Portainer (Docker)
+- Suwayomi (Docker)
+- Caddy Reverse Proxy (Docker)
 
-Ports:
+Service Ports:
 - 80: HTTP
 $([ "$SETUP_TYPE" = "production" ] && echo "- 443: HTTPS")
 - 8080: Wings API
 - 2022: SFTP
 - 25565-25575: Minecraft
 - 27015: Source Games
-- 7777-7780: Other Games
+
+Configuration Files:
+- Docker Compose: $INSTALL_DIR/docker-compose.yml
+- Caddy Config: $INSTALL_DIR/Caddyfile
+- Wings Config: /etc/pelican/config.yml
+- Wings Helper: $INSTALL_DIR/configure-wings.sh
 EOF
 
-print_info "Installation details saved to installation-info.txt"
+print_info "Installation details saved to: $INSTALL_DIR/installation-info.txt"
+
+if [ "$NEED_RELOGIN" = true ]; then
+    echo ""
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║         IMPORTANT: Log out and back in to continue!         ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+fi
+
+echo ""
+print_success "All done! Enjoy your game server stack! 🎮"
